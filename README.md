@@ -12,7 +12,7 @@
 
 <div align="center">
 
-[![Buy Agency Whitelabel Source Code $499](https://img.shields.io/badge/Instant%20Checkout-Agency%20Whitelabel%20Codebase%20$499-0284c7?style=for-the-badge&logo=github)](https://rzp.io/rzp/5xGEcK0f)
+[![Buy Agency Whitelabel Source Code $499](https://img.shields.io/badge/Instant%20Checkout-Agency%20Whitelabel%20Codebase%20$499-0284c7?style=for-the-badge&logo=github)](https://rzp.io/rzp/0yYOpEOz)
 [![Commercial Licensing Portal](https://img.shields.io/badge/Commercial%20Licensing-Portal%20Details-7c3aed?style=for-the-badge&logo=googlechrome)](https://unnataisolutions.com/software-license)
 
 <br/><br/>
