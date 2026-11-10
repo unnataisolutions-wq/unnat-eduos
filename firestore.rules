@@ -1,0 +1,1115 @@
+rules_version = '2';
+// Phase 12: UNNAT Production Security Rules
+// Role-based access control for 5-system architecture
+// Last updated: February 2026
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // REMOVED: TEMPORARY Allow all for migration
+    // allow read, write: if true;
+
+    // ================================================================
+    // HELPER FUNCTIONS - Authentication & Authorization
+    // ================================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwnUser(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Helper to get user data from Firestore (Free Tier source of truth)
+    function getUserData() {
+      let doc = exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? 
+                get(/databases/$(database)/documents/users/$(request.auth.uid)) : null;
+      return doc != null ? doc.data : null;
+    }
+    
+    function getUserRole() {
+      let data = getUserData();
+      return data != null && 'role' in data ? data.role : null;
+    }
+
+    function getInstitutionId() {
+      let data = getUserData();
+      return data != null && 'institutionId' in data ? data.institutionId : null;
+    }
+
+    function isValidInstitutionId(instId) {
+      return instId != null && instId != '' && instId != 'default';
+    }
+
+    function hasInstitution() {
+      return isValidInstitutionId(getInstitutionId());
+    }
+
+    // Returns true if a user is in the public sovereign cluster (individual/unbound students)
+    function isPublicClusterUser() {
+      let data = getUserData();
+      return data != null && data.get('institutionId', '') == 'public_sovereign_cluster';
+    }
+
+    function isPlatformOwner() {
+      let email = 'email' in request.auth.token ? request.auth.token.email : null;
+      return email == 'unnattuitioncenter@gmail.com' || email == 'teenasharmaa90@gmail.com' || email == 'admin@unnatailearning.com' || email == 'unnataisolutions@gmail.com';
+    }
+
+    function isSameInstitution(docData) {
+      let docInst = docData.get('institutionId', '');
+      return (isAuthenticated() && hasInstitution() && docInst == getInstitutionId()) || isPlatformOwner();
+    }
+    
+    function isStudent() {
+      return getUserRole() == 'student';
+    }
+    
+    function isTeacher() {
+      return getUserRole() == 'teacher';
+    }
+    
+    function isParent() {
+      return getUserRole() == 'parent';
+    }
+    
+    function isAdmin() {
+      return getUserRole() == 'admin' || isPlatformOwner();
+    }
+
+    function isInstitutionAdminFor(institutionId) {
+      return isAdmin() && getInstitutionId() == institutionId;
+    }
+
+    function isInstitutionOwner(institutionId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/institutions/$(institutionId)) &&
+        get(/databases/$(database)/documents/institutions/$(institutionId)).data.ownerId == request.auth.uid;
+    }
+
+    function isSafeInstitutionAdminUpdate(institutionId) {
+      return isInstitutionAdminFor(institutionId) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'plan',
+          'isSubscriptionActive',
+          'subscriptionExpiresAt',
+          'paymentStatus',
+          'hasHadPaidSubscription',
+          'enabledFeatures',
+          'planLimits',
+          'maxClasses',
+          'maxStudents',
+          'maxTeachers'
+        ]);
+    }
+
+    function isPendingInstitutionPaymentSubmission(institutionId) {
+      return isInstitutionAdminFor(institutionId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'paymentStatus',
+          'transactionIds',
+          'updatedAt'
+        ]) &&
+        request.resource.data.paymentStatus == 'pending' &&
+        request.resource.data.plan == resource.data.plan &&
+        request.resource.data.isSubscriptionActive == resource.data.isSubscriptionActive &&
+        request.resource.data.subscriptionExpiresAt == resource.data.subscriptionExpiresAt &&
+        request.resource.data.enabledFeatures == resource.data.enabledFeatures &&
+        request.resource.data.planLimits == resource.data.planLimits &&
+        request.resource.data.maxClasses == resource.data.maxClasses &&
+        request.resource.data.maxStudents == resource.data.maxStudents &&
+        request.resource.data.maxTeachers == resource.data.maxTeachers;
+    }
+
+    function isSafeInstitutionOwnerOnboardingUpdate(institutionId) {
+      return isInstitutionOwner(institutionId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'paymentStatus',
+          'transactionIds',
+          'subscriptionExpiresAt',
+          'isSubscriptionActive',
+          'updatedAt'
+        ]) &&
+        request.resource.data.ownerId == resource.data.ownerId &&
+        request.resource.data.plan == resource.data.plan &&
+        request.resource.data.enabledFeatures == resource.data.enabledFeatures &&
+        request.resource.data.planLimits == resource.data.planLimits &&
+        request.resource.data.maxClasses == resource.data.maxClasses &&
+        request.resource.data.maxStudents == resource.data.maxStudents &&
+        request.resource.data.maxTeachers == resource.data.maxTeachers;
+    }
+
+    function isOwnTransactionCreate(transactionId) {
+      return isAuthenticated() &&
+        request.resource.data.id == transactionId &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.totalAmount > 0 &&
+        request.resource.data.utr == '' &&
+        (
+          request.resource.data.institutionId == getInstitutionId() ||
+          request.resource.data.institutionId == 'INDIVIDUAL' ||
+          request.resource.data.institutionId == ('INDIVIDUAL_' + request.auth.uid)
+        );
+    }
+
+    function isSafeOwnTransactionUpdate(transactionId) {
+      return isAuthenticated() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.id == transactionId &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.institutionId == resource.data.institutionId &&
+        request.resource.data.planName == resource.data.planName &&
+        request.resource.data.totalAmount == resource.data.totalAmount &&
+        request.resource.data.amount == resource.data.amount &&
+        request.resource.data.gstAmount == resource.data.gstAmount &&
+        request.resource.data.method == resource.data.method &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'utr',
+          'status',
+          'timestamp',
+          'proofUrl',
+          'proofFileName',
+          'proofUploadedAt',
+          'anomalyFlags',
+          'duplicateAttemptCount',
+          'reviewStatus',
+          'reviewNote',
+          'updatedAt'
+        ]) &&
+        (
+          (
+            request.resource.data.status == 'verifying' &&
+            request.resource.data.utr.matches('^[0-9]{12}$')
+          ) ||
+          request.resource.data.status == resource.data.status
+        );
+    }
+
+    function isSafeOwnUserUpdate(userId) {
+      return isOwnUser(userId) && (
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'role',
+          'isSuperAdmin',
+          'institutionId',
+          'isSovereign',
+          'personalPlan',
+          'isPersonalSubscriptionActive',
+          'personalSubscriptionExpiresAt',
+          'subscriptionExpiresAt'
+        ]) || (
+          // Sovereign auto-repair: allow unassigned students to bind to public cluster
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['institutionId', 'updatedAt']) &&
+          request.resource.data.institutionId == 'public_sovereign_cluster'
+        )
+      );
+    }
+
+    function isOwnerInstitutionOnboardingBind(userId) {
+      let nextInstitutionId = request.resource.data.institutionId;
+      return isOwnUser(userId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'institutionId',
+          'role',
+          'isSovereign',
+          'hasOnboarded',
+          'availableViews',
+          'activeView',
+          'email',
+          'displayName',
+          'updatedAt'
+        ]) &&
+        request.resource.data.role == 'admin' &&
+        request.resource.data.isSovereign == true &&
+        request.resource.data.hasOnboarded == true &&
+        isValidInstitutionId(nextInstitutionId) &&
+        exists(/databases/$(database)/documents/institutions/$(nextInstitutionId)) &&
+        get(/databases/$(database)/documents/institutions/$(nextInstitutionId)).data.ownerId == request.auth.uid;
+    }
+
+    function isSafeInstitutionAdminUserUpdate() {
+      return isAdmin() &&
+        isSameInstitution(resource.data) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'isSuperAdmin',
+          'institutionId',
+          'personalPlan',
+          'isPersonalSubscriptionActive',
+          'personalSubscriptionExpiresAt',
+          'subscriptionExpiresAt'
+        ]);
+    }
+    
+    function now() {
+      return request.time.toMillis();
+    }
+    
+    // ================================================================
+    // HELPER FUNCTIONS - Class & Student Relationships
+    // ================================================================
+    
+    function teachesClass(classId) {
+      return isAuthenticated() && isTeacher() &&
+        exists(/databases/$(database)/documents/classes/$(classId)/teachers/$(request.auth.uid));
+    }
+    
+    function isInClass(classId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/classes/$(classId)/students/$(request.auth.uid));
+    }
+    
+    function isChildParent(studentId) {
+      return isAuthenticated() && isParent() &&
+        get(/databases/$(database)/documents/users/$(studentId)).data.parentId == request.auth.uid;
+    }
+
+
+    // ================================================================
+    // USER PROFILES
+    // ================================================================
+    
+    match /users/{userId} {
+      // Read: Authenticated users can read profile info for referral stats & leaderboards
+      allow read: if isAuthenticated();
+      
+      // Create: Authenticated users setting up profiles (strict role enforcement)
+      // Platform owners bypass institution ownership check (handles public_sovereign_cluster fallback)
+      allow create: if isOwnUser(userId) &&
+        request.resource.data.createdAt == request.time &&
+        isValidInstitutionId(request.resource.data.institutionId) &&
+        (
+          request.resource.data.role in ['student', 'teacher', 'parent'] ||
+          isPlatformOwner() ||
+          (request.resource.data.role == 'admin' &&
+           (
+             getAfter(/databases/$(database)/documents/institutions/$(request.resource.data.institutionId)).data.ownerId == request.auth.uid ||
+             (
+               exists(/databases/$(database)/documents/institutions/$(request.resource.data.institutionId)) &&
+               get(/databases/$(database)/documents/institutions/$(request.resource.data.institutionId)).data.ownerId == request.auth.uid
+             )
+           ))
+        );
+      
+      // Update: Prevent role/institution escalation
+      allow update: if 
+        isSafeOwnUserUpdate(userId) ||
+        isOwnerInstitutionOnboardingBind(userId) ||
+        isSafeInstitutionAdminUserUpdate() ||
+        isPlatformOwner();
+      
+      // Delete: Platform owner only
+      allow delete: if isPlatformOwner();
+
+      // Remedial lessons sub-collection (AI-generated remediation)
+      match /remedial_lessons/{lessonId} {
+        allow read: if isOwnUser(userId) || isAdmin();
+        allow write: if isAdmin() || isPlatformOwner();
+      }
+
+      // All other sub-collections under a user (notifications, activity, etc.)
+      match /{subcollection}/{docId} {
+        allow read: if isOwnUser(userId) || isAdmin();
+        allow write: if isOwnUser(userId) || isAdmin();
+      }
+    }
+    
+    // ================================================================
+    // CLASSES (System 4: Teacher Intelligence)
+    // ================================================================
+    
+    match /classes/{classId} {
+      // Read: Teachers in class + admin (with multi-tenancy check)
+      allow read: if (teachesClass(classId) || isInClass(classId) || isAdmin()) && 
+                    isSameInstitution(resource.data);
+      
+      // Create: Teachers within their institution or admins provisioning school structure
+      allow create: if (
+        isTeacher() &&
+        request.resource.data.createdBy == request.auth.uid &&
+        isValidInstitutionId(request.resource.data.institutionId) &&
+        request.resource.data.institutionId == getInstitutionId() &&
+        request.resource.data.createdAt == now()
+      ) || (
+        isAdmin() &&
+        isValidInstitutionId(request.resource.data.institutionId) &&
+        request.resource.data.institutionId == getInstitutionId()
+      );
+      
+      // Update: Class creator or admin
+      allow update: if (isTeacher() && resource.data.createdBy == request.auth.uid) || isAdmin();
+      
+      // Delete: Admin only
+      allow delete: if isAdmin();
+      
+      // ===============================================================
+      // CLASS STUDENT PROGRESS (System 4: Real-time tracking)
+      // ===============================================================
+      
+      match /studentProgress/{studentId} {
+        // Read: Student (own), Teacher (in class), Parent (child), Admin
+        allow read: if (isStudent() && isOwnUser(studentId) && isInClass(classId)) ||
+                       (isTeacher() && teachesClass(classId)) ||
+                       (isParent() && isChildParent(studentId)) ||
+                       isAdmin();
+        
+        // Write: System + Cloud Functions only (no direct app writes)
+        allow write: if false;
+      }
+      
+      // ===============================================================
+      // CLASS TEACHERS (System 4: Teacher assignments)
+      // ===============================================================
+      
+      match /teachers/{teacherId} {
+        // Read: Class students, teacher self, admin
+        allow read: if isInClass(classId) || 
+                       (isTeacher() && isOwnUser(teacherId)) ||
+                       isAdmin();
+        
+        // Write: Admin only
+        allow write: if isAdmin();
+      }
+      
+      // ===============================================================
+      // CLASS STUDENTS (System 4: Student enrollment)
+      // ===============================================================
+      
+      match /students/{studentId} {
+        // Read: Students in class, teachers of class, admin
+        allow read: if isInClass(classId) ||
+                       (isTeacher() && teachesClass(classId)) ||
+                       isAdmin();
+        
+        // Write: Teacher adding students
+        allow write: if isTeacher() && teachesClass(classId);
+      }
+    }
+    
+    // ================================================================
+    // STUDENT ALERTS (System 4: Real-time monitoring)
+    // ================================================================
+    
+    match /studentAlerts/{alertId} {
+      // Read: Teacher of class + admin (with strict institution boundary)
+      allow read: if ((isTeacher() && teachesClass(resource.data.classId)) || isAdmin()) && isSameInstitution(resource.data);
+      
+      // Write: Cloud Functions only
+      allow write: if false;
+    }
+    
+    // ================================================================
+    // GRADING RECORDS (System 4: Auto-grading)
+    // ================================================================
+    
+    match /gradingRecords/{recordId} {
+      // Read: Teacher who created + admin
+      allow read: if ((isTeacher() && isOwnUser(resource.data.teacherId) && teachesClass(resource.data.classId)) || isAdmin()) && isSameInstitution(resource.data);
+      
+      // Create: Teachers grading
+      allow create: if isTeacher() && 
+        request.resource.data.teacherId == request.auth.uid &&
+        teachesClass(request.resource.data.classId) &&
+        request.resource.data.createdAt == now();
+      
+      // Write: Cloud Functions only
+      allow write: if false;
+    }
+    
+    // ================================================================
+    // GENERATED QUIZZES (System 4: AI quiz generation)
+    // ================================================================
+    
+    match /quizzes/{quizId} {
+      allow read: if isAuthenticated() && isSameInstitution(resource.data);
+      allow create, update: if (isTeacher() || isAdmin()) && isSameInstitution(request.resource.data);
+      allow delete: if isAdmin() && isSameInstitution(resource.data);
+    }
+    
+    match /generatedQuizzes/{quizId} {
+      // Read: Teacher (creator), Students (in class), Admin
+      allow read: if (
+                      (isTeacher() && isOwnUser(resource.data.teacherId) && teachesClass(resource.data.classId)) ||
+                      (isStudent() && isInClass(resource.data.classId)) ||
+                      isAdmin()
+                    ) && isSameInstitution(resource.data);
+      
+      // Create: Teachers generating quizzes
+      allow create: if isTeacher() &&
+        request.resource.data.teacherId == request.auth.uid &&
+        teachesClass(request.resource.data.classId) &&
+        isSameInstitution(request.resource.data);
+      
+      // Write: Cloud Functions only
+      allow write: if false;
+    }
+
+    // ================================================================
+    // ACHIEVEMENTS (System 1: Unlocks via accomplishments)
+    // ================================================================
+    
+    match /achievements/{achievementId} {
+      // Read: User (own) + admin
+      allow read: if isOwnUser(resource.data.userId) || isAdmin();
+      
+      // Write: Cloud Functions only (achievement system triggers)
+      allow write: if false;
+    }
+    
+    // ================================================================
+    // LEADERBOARDS (System 1 & 5: Rankings + Viral)
+    // ================================================================
+    
+    match /leaderboards/{period} {
+      // Read: All authenticated (public rankings)
+      allow read: if isAuthenticated();
+      
+      // Write: Cloud Functions only
+      allow write: if false;
+      
+      match /rankings/{userId} {
+        // Read: All authenticated
+        allow read: if isAuthenticated();
+        
+        // Write: Cloud Functions only
+        allow write: if false;
+      }
+    }
+    
+    // ================================================================
+    // REFERRALS & VIRAL MECHANICS (System 5: Growth)
+    // ================================================================
+    
+    match /referrals/{referralId} {
+      // Read: Referrer (own) + admin
+      allow read: if isOwnUser(resource.data.referrerId) || isOwnUser(resource.data.newUserId) || isAdmin();
+      
+      // Create & Write: Cloud Functions only (triggered by referral completion)
+      allow write: if false;
+    }
+    
+    match /referralCodes/{code} {
+      // Read: Public (codes are shared)
+      allow read: if true;
+      
+      // Write: Cloud Functions only
+      allow write: if false;
+    }
+    
+    // ================================================================
+    // ANALYTICS PIPELINE (System Infrastructure)
+    // ================================================================
+    match /analytics/{path=**} {
+      // Allow analytics logging for telemetry
+      allow read, write: if isAuthenticated() || true;
+    }
+    
+    // ================================================================
+    // COURSES (Marketplace - publicly readable by all authenticated)
+    // ================================================================
+    
+    match /courses/{courseId=**} {
+      // Read: All authenticated users (browse marketplace + content)
+      allow read: if isAuthenticated();
+      
+      // Create/Update: Admin or teachers only
+      allow create, update: if isAdmin() || isTeacher();
+      
+      // Delete: Admin only
+      allow delete: if isAdmin();
+    }
+    
+    match /public_courses/{courseId=**} {
+      // Read: Public (Marketplace display)
+      allow read: if isAuthenticated();
+      
+      // Create/Update: Admin only
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /user_purchased_courses/{purchaseId} {
+      // Allow student to read and record their enrolled/purchased courses
+      allow read, write: if isAuthenticated();
+    }
+
+    match /squads/{squadId=**} {
+      // Read: Any authenticated user can see squads
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+      allow delete: if isAdmin();
+    }
+    
+    // ================================================================
+    // STUDENTS (Top-level - AI Neural Path & personal data)
+    // ================================================================
+    
+    match /students/{studentId} {
+      // Read: Any authenticated user can read public student profiles / leaderboard / linked accounts
+      allow read: if isAuthenticated();
+      
+      // Write: Own student (by doc id or linkedUid) or admin with institution boundary
+      allow create: if isOwnUser(studentId) || (isAuthenticated() && request.resource.data.linkedUid == request.auth.uid) || (isAdmin() && isSameInstitution(request.resource.data));
+      allow update: if isOwnUser(studentId) || (isAuthenticated() && resource.data.linkedUid == request.auth.uid) || (isAdmin() && isSameInstitution(request.resource.data));
+      allow delete: if isOwnUser(studentId) || (isAdmin() && isSameInstitution(resource.data));
+      
+      // Neural Path subcollection (AI learning path data)
+      match /neural_path/{docId} {
+        allow read: if isOwnUser(studentId) || isAdmin() || isChildParent(studentId);
+        allow write: if isOwnUser(studentId) || isAdmin();
+      }
+      
+      // Any other subcollection under a student
+      match /{subcollection}/{docId} {
+        allow read: if isOwnUser(studentId) || isAdmin() || isChildParent(studentId);
+        allow write: if isOwnUser(studentId) || isAdmin();
+      }
+    }
+    
+    // ================================================================
+    // TEACHERS (Top-level Profile)
+    // ================================================================
+    
+    match /teachers/{teacherId} {
+      allow read: if (isOwnUser(teacherId) || isAdmin()) && isSameInstitution(resource.data);
+      // Allow creation during onboarding if they match the user doc in the same batch
+      allow create: if isOwnUser(teacherId) && 
+                      getAfter(/databases/$(database)/documents/users/$(teacherId)).data.role == 'teacher';
+      allow update: if (isOwnUser(teacherId) || isAdmin()) && isSameInstitution(request.resource.data);
+    }
+    
+    // ================================================================
+    // NOTIFICATIONS & PUSH STATE
+    // ================================================================
+    
+    match /notifications/{userId}/messages/{messageId} {
+      // Read & Write: Own messages only
+      allow read, write: if isOwnUser(userId);
+      
+      // Delete: Own messages only
+      allow delete: if isOwnUser(userId);
+    }
+    
+    // ================================================================
+    // USER SETTINGS & PREFERENCES
+    // ================================================================
+    
+    match /user_settings/{userId} {
+      // Read/Write: Own user only
+      allow read, write: if isOwnUser(userId) || isAdmin();
+      
+      match /{subcollection}/{docId} {
+        allow read, write: if isOwnUser(userId) || isAdmin();
+      }
+    }
+    
+    // ================================================================
+    // SYSTEM CONFIGURATION (Read-only for users)
+    // ================================================================
+    
+    match /config/{docId} {
+      // Read: All authenticated
+      allow read: if isAuthenticated();
+      
+      // Write: Admin only
+      allow write: if isAdmin();
+    }
+    
+    // ================================================================
+    // ATTENDANCE RECORDS (Student dashboard)
+    // ================================================================
+    
+    match /attendance_records/{recordId} {
+      // Read: Own student can always read their own records.
+      //        Teachers/admins must be in the same institution.
+      allow read: if isAuthenticated() && (
+        isOwnUser(resource.data.get('studentId', '')) ||
+        ((isTeacher() || isAdmin()) && isSameInstitution(resource.data))
+      );
+      
+      // Write: Teachers + admin with institution boundary
+      allow write: if (isTeacher() || isAdmin()) && isSameInstitution(resource.data);
+    }
+
+    // ================================================================
+    // FEE TRANSACTIONS (Collection Group query used by Admin Dashboard)
+    // ================================================================
+    
+    match /{path=**}/fee_transactions/{transactionId} {
+      allow read: if isSameInstitution(resource.data) &&
+        (isAdmin() || (isAuthenticated() && resource.data.studentId == request.auth.uid));
+      allow write: if isAdmin() && isSameInstitution(request.resource.data);
+    }
+    
+    // ================================================================
+    // QUIZ RESULTS (Student performance tracking)
+    // ================================================================
+    
+    match /quiz_results/{resultId} {
+      // Read: Own student can always read their own results.
+      //        Teachers/admins need institution match.
+      allow read: if isAuthenticated() && (
+        isOwnUser(resource.data.get('studentId', '')) ||
+        ((isTeacher() || isAdmin()) && isSameInstitution(resource.data))
+      );
+      
+      // Create: Students submitting results — allow if own studentId
+      allow create: if isAuthenticated() &&
+        request.resource.data.studentId == request.auth.uid;
+      
+      allow update, delete: if isAdmin() && isSameInstitution(resource.data);
+    }
+    
+    // ================================================================
+    // ASSIGNMENTS (Homework & tasks)
+    // ================================================================
+    
+    match /assignments/{assignmentId} {
+      // Read: All authenticated students can read assignments from their institution.
+      //        Public cluster students get open read access (they are unbound individual learners).
+      allow read: if isAuthenticated() && (
+        isSameInstitution(resource.data) || isStudent()
+      );
+      
+      // Create/Update: Teachers + admin within boundary
+      allow create, update: if (isTeacher() || isAdmin()) && isSameInstitution(request.resource.data);
+      
+      // Delete: Admin only within boundary
+      allow delete: if isAdmin() && isSameInstitution(resource.data);
+    }
+
+    
+    // ================================================================
+    // MORNING BRIEFINGS (Daily AI-generated briefings per student)
+    // ================================================================
+    
+    match /briefings/{briefingId} {
+      // Read: Own student + admin
+      allow read: if isAuthenticated() &&
+        (resource.data.studentId == request.auth.uid || isAdmin());
+      
+      // Create: Own student or Cloud Functions (admin)
+      allow create: if isAuthenticated() &&
+        (request.resource.data.studentId == request.auth.uid || isAdmin());
+      
+      // Update/Delete: Admin only
+      allow update, delete: if isAdmin();
+    }
+    
+    // ================================================================
+    // BATTLE ARENA (Multiplayer quiz battles)
+    // ================================================================
+    
+    match /battle_lobby/{lobbyId} {
+      // Read: Participants only (prevent global sniffing)
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // Create: Own user creating a lobby slot
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      
+      // Update: Participants only
+      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // Delete: Creator or admin
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+    
+    match /battles/{battleId} {
+      // Read: Restricted to participants, admins, or same-institution members
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin() || isSameInstitution(resource.data));
+      
+      // Create: Authenticated users (system creates battle rooms)
+      allow create: if isAuthenticated();
+      
+      // Update: Participants submitting answers
+      allow update: if isAuthenticated();
+      
+      // Delete: Admin only
+      allow delete: if isAdmin();
+      
+      match /actions/{actionId} {
+        allow read, create: if isAuthenticated() && 
+          (resource == null || resource.data.userId == request.auth.uid || isAdmin());
+      }
+
+      match /{subcollection}/{docId} {
+        allow read: if isAuthenticated();
+        allow write: if isAdmin();
+      }
+    }
+
+    // ================================================================
+    // CURATED & PHANTOM CONTENT (System 5: Content Intelligence)
+    // ================================================================
+
+    match /curated_lessons/{lessonId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /phantom_lessons/{lessonId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // ================================================================
+    // BLOGS (System 5: SEO Content Intelligence)
+    // ================================================================
+
+    match /blogs/{blogId} {
+      // Read: Public (for SEO guest access)
+      allow read: if true;
+      
+      // Write: Admin only (for publication)
+      allow write: if isAdmin();
+    }
+    
+    // ================================================================
+    // ROLE MANAGEMENT (System Internal)
+    // ================================================================
+
+    match /user_roles/{userId} {
+      // Must be same institution to read roles of other users
+      allow read: if isAuthenticated() && (isOwnUser(userId) || isPlatformOwner() || isSameInstitution(resource.data));
+      allow write: if
+        (isAdmin() && isSameInstitution(request.resource.data)) ||
+        (
+          isOwnUser(userId) &&
+          request.resource.data.role == 'institutionAdmin' &&
+          isValidInstitutionId(request.resource.data.institutionId) &&
+          exists(/databases/$(database)/documents/institutions/$(request.resource.data.institutionId)) &&
+          get(/databases/$(database)/documents/institutions/$(request.resource.data.institutionId)).data.ownerId == request.auth.uid
+        ) ||
+        isPlatformOwner();
+    }
+
+    match /admin_invites/{inviteId} {
+      allow read: if isAuthenticated() && (
+        (request.auth.token.email != null && inviteId == request.auth.token.email) ||
+        (isAdmin() && isSameInstitution(resource.data)) ||
+        isPlatformOwner()
+      );
+      allow create, update: if
+        (isAdmin() && isSameInstitution(request.resource.data)) ||
+        (
+          isAuthenticated() &&
+          request.resource.data.role == 'principal' &&
+          isValidInstitutionId(request.resource.data.institutionId) &&
+          exists(/databases/$(database)/documents/institutions/$(request.resource.data.institutionId)) &&
+          get(/databases/$(database)/documents/institutions/$(request.resource.data.institutionId)).data.ownerId == request.auth.uid
+        ) ||
+        isPlatformOwner();
+      allow delete: if (isAdmin() && isSameInstitution(resource.data)) || isPlatformOwner();
+    }
+
+    // ================================================================
+    // TEACHER INVITES (Pre-auth onboarding)
+    // ================================================================
+
+    match /teacher_invites/{inviteId} {
+      // Invited user can read their own invite, or admin within same institution
+      allow read: if isAuthenticated() && (
+        (request.auth.token.email != null && resource.data.email == request.auth.token.email) ||
+        (isAdmin() && isSameInstitution(resource.data))
+      );
+      // Admin creating invites within their institution
+      allow create: if isAdmin() && isSameInstitution(request.resource.data);
+      // Allow deletion during onboarding if the user doc is created in the same batch
+      allow delete: if isAuthenticated() && (
+        (request.auth.token.email != null && resource.data.email == request.auth.token.email) ||
+        (isAdmin() && isSameInstitution(resource.data))
+      );
+    }
+
+    // ================================================================
+    // INSTITUTIONS (Multi-tenancy Management)
+    // ================================================================
+
+    match /institutions/{institutionId} {
+      // Admin-only read (protects financial + sensitive fields)
+      allow read: if isAuthenticated() &&
+        ((isAdmin() && getInstitutionId() == institutionId) || isInstitutionOwner(institutionId) || isPlatformOwner());
+      // Allow self-serve SaaS onboarding
+      allow create: if isAuthenticated() &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.id == institutionId &&
+        isValidInstitutionId(request.resource.data.id);
+      // Normal admin operations + allow teachers to increment their counter during first login
+      allow update: if isPlatformOwner() ||
+        isSafeInstitutionAdminUpdate(institutionId) ||
+        isPendingInstitutionPaymentSubmission(institutionId) ||
+        isSafeInstitutionOwnerOnboardingUpdate(institutionId) ||
+        (isAuthenticated() && 
+         getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.institutionId == institutionId &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['currentTeachers', 'updatedAt']));
+      allow delete: if (isAdmin() && getInstitutionId() == institutionId) || isPlatformOwner();
+
+      match /admissions/{docId} {
+        // 🛡️ SOVEREIGN MAILBOX: Allow public create (submission) but deny all other public access.
+        // Admins retain full control.
+        allow create: if request.resource.data.status == 'Pending' && 
+                        request.resource.data.institutionId == institutionId;
+        allow read, update, delete: if (isAdmin() && getInstitutionId() == institutionId) || isPlatformOwner();
+      }
+
+      // Institutional Visibility for specific modules
+      match /transport_routes/{routeId} {
+        allow read: if isAuthenticated() && getInstitutionId() == institutionId;
+        allow write: if isAdmin() && getInstitutionId() == institutionId;
+      }
+
+      match /library/{bookId} {
+        allow read: if isAuthenticated() && getInstitutionId() == institutionId;
+        allow write: if (isAdmin() || isTeacher()) && getInstitutionId() == institutionId;
+      }
+
+      match /inventory/{itemId} {
+        allow read: if (isAdmin() || isTeacher()) && getInstitutionId() == institutionId;
+        allow write: if isAdmin() && getInstitutionId() == institutionId;
+      }
+
+      match /expenses/{expenseId} {
+        allow read, write: if isAdmin() && getInstitutionId() == institutionId;
+      }
+
+      match /salaries/{salaryId} {
+        allow read, write: if isAdmin() && getInstitutionId() == institutionId;
+      }
+
+      match /academic_ledger/{classId}/daily_logs/{dateStr} {
+        // Read: Any authenticated member of the institution
+        allow read: if isAuthenticated() && getInstitutionId() == institutionId;
+        // Write: Admins and Teachers of the institution only
+        allow write: if (isAdmin() || isTeacher()) && getInstitutionId() == institutionId;
+      }
+
+      match /{subcollection}/{docId} {
+        allow read, write: if (isAdmin() && getInstitutionId() == institutionId) || isPlatformOwner();
+      }
+    }
+
+    // Public, non-sensitive institution branding
+    match /institutions_public/{institutionId} {
+      allow read: if true;
+      allow write: if (isAdmin() && getInstitutionId() == institutionId) || isInstitutionOwner(institutionId) || isPlatformOwner();
+
+      match /{subcollection}/{docId} {
+        allow read: if true;
+        allow write: if (isAdmin() && getInstitutionId() == institutionId) || isInstitutionOwner(institutionId) || isPlatformOwner();
+      }
+    }
+
+    match /institution_websites/{institutionId} {
+      allow read: if true;
+      allow write: if (isAdmin() && getInstitutionId() == institutionId) || isInstitutionOwner(institutionId) || isPlatformOwner();
+    }
+
+    // ================================================================
+    // CLOUD RENDER JOBS (Phase 12: GitHub Actions Bridge)
+    // ================================================================
+    
+    match /render_jobs/{jobId} {
+      // Read: Participant (own job) + admin
+      // Note: We use isAuthenticated() || isAdmin() to allow any logged in user to see potential public jobs
+      // but in production, you might restrict this to isOwnUser() if privacy is required.
+      allow read: if (isAuthenticated() && resource.data.createdBy == request.auth.uid) || isAdmin();
+      
+      // Create: Authenticated users initiating a render
+      allow create: if isAuthenticated() &&
+        request.resource.data.createdBy == request.auth.uid &&
+        request.resource.data.status in ['uploading', 'uploaded', 'uploading_done'];
+      
+      // Update: Participants (can cancel) + Cloud Functions / Admin SDK (GitHub)
+      // Note: Cloud Functions & Admin SDK bypass these rules automatically.
+      allow update: if isAuthenticated() &&
+        resource.data.createdBy == request.auth.uid;
+    }
+
+    // ================================================================
+    // SYLLABUS (NCERT & AI Generated)
+    // ================================================================
+    
+    match /syllabus/{syllabusId} {
+      // Syllabus is public NCERT/Study data, but still scoped to institution for custom curricular needs
+      allow read: if isAuthenticated() && (resource == null || isSameInstitution(resource.data));
+      allow write: if isAdmin();
+    }
+
+    // ================================================================
+    // CURRICULUM (NCERT Chapter & Exercise Structure)
+    // ================================================================
+
+    match /curriculum/{subject} {
+      // Read: All authenticated users (needed for chapter/exercise dropdowns)
+      allow read: if isAuthenticated();
+      // Write: Admin only
+      allow write: if isAdmin();
+
+      match /levels/{level} {
+        allow read: if isAuthenticated();
+        allow write: if isAdmin();
+
+        match /chapters/{chapterId} {
+          allow read: if isAuthenticated();
+          allow write: if isAdmin();
+
+          match /{subcollection}/{docId} {
+            allow read: if isAuthenticated();
+            allow write: if isAdmin();
+          }
+        }
+      }
+    }
+
+    // ================================================================
+    // STUDY MATERIALS (Universal & Institutional)
+    // ================================================================
+
+    match /study_materials/{materialId} {
+      // Read: Institution members OR if it is a public sample
+      allow read: if isAuthenticated() && (
+        isSameInstitution(resource.data) || 
+        resource.data.get('isPublicSample', false) == true
+      );
+      // Write: Teachers and Admins within their own institution
+      allow create, update: if (isTeacher() || isAdmin()) && 
+                               isSameInstitution(request.resource.data);
+      allow delete: if isAdmin() && isSameInstitution(resource.data);
+    }
+
+    // ================================================================
+    // LEADS (India Monopoly Scouting Pipeline)
+    // ================================================================
+    
+    match /leads/{leadId} {
+      // Read & Write: Platform Owner (CEO) and Admin of the institution
+      allow read, write: if isPlatformOwner() || (isAdmin() && isSameInstitution(resource == null ? request.resource.data : resource.data));
+    }
+
+    // ================================================================
+    // ADMISSION INQUIRIES (Institutional CRM)
+    // ================================================================
+    
+    match /student_leads/{leadId} {
+      allow read, write: if isAdmin() && isSameInstitution(resource == null ? request.resource.data : resource.data);
+    }
+
+
+
+    // ================================================================
+    // DEFAULT DENY (Security first)
+    // ================================================================
+    
+
+    // ================================================================
+    // WALLETS (Campus Cashless System)
+    // ================================================================
+
+    match /wallets/{userId} {
+      // Read/Write: Own user (student checking balance) + admin
+      allow read: if isOwnUser(userId) || isAdmin();
+      allow write: if isAdmin() || isPlatformOwner();
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        resource.data.institutionId == getInstitutionId() ||
+        isPlatformOwner()
+      );
+      allow create: if isOwnTransactionCreate(transactionId) || (isAuthenticated() && request.resource.data.userId == request.auth.uid);
+      allow update: if isSafeOwnTransactionUpdate(transactionId) || isPlatformOwner();
+      allow delete: if isPlatformOwner();
+    }
+
+    match /wallet_transactions/{transactionId} {
+      // Read: Own user + admin
+      allow read: if isAuthenticated() && (
+        resource.data.get('userId', '') == request.auth.uid ||
+        isAdmin()
+      );
+      // Write: Own user creating wallet request or system admin
+      allow create: if isAuthenticated() && (
+        request.resource.data.get('userId', '') == request.auth.uid ||
+        isAdmin() ||
+        isPlatformOwner()
+      );
+      allow update, delete: if isAdmin() || isPlatformOwner();
+    }
+
+    // ================================================================
+    // GENERAL / OPERATIONAL LOGS & RESOURCES
+    // ================================================================
+
+    match /corporate_logs/{logId} {
+      allow read, write: if isPlatformOwner() || isAdmin();
+    }
+
+    match /schedules/{scheduleId} {
+      allow read, write: if isAuthenticated() && isSameInstitution(resource == null ? request.resource.data : resource.data);
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if isAuthenticated() && isSameInstitution(resource.data);
+      allow write: if (isAdmin() || isTeacher()) && isSameInstitution(request.resource.data);
+    }
+
+    // --- Logistics & Live Tracking ---
+    match /logistics/{routeId} {
+      // Read: Users from the same institution
+      allow read: if isAuthenticated() && isSameInstitution(resource.data);
+      // Write: System/Admin only (usually via Backend/Master Command)
+      allow write: if isAdmin() && isSameInstitution(request.resource.data);
+    }
+
+    match /trial_codes/{codeId} {
+      // Signed-in onboarding users must be able to validate a code, while
+      // owner/admin users can also list and inspect issued codes in the desk.
+      allow read: if isAuthenticated();
+
+      // Platform owner or admin can issue / deactivate / correct codes.
+      allow create, update, delete: if isPlatformOwner() || isAdmin();
+    }
+
+    // --- NCERT Solutions Cloud Repository ---
+    match /ncert_math_solutions/{solutionId} {
+      // Read: Open to all users / students
+      allow read: if true;
+
+      // Write: Authenticated users / platform owners / admins / teachers
+      allow write: if isAuthenticated() || isPlatformOwner() || isAdmin() || isTeacher();
+    }
+
+    match /ncert_science_solutions/{solutionId} {
+      // Read: Open to all users / students
+      allow read: if true;
+
+      // Write: Authenticated users / platform owners / admins / teachers
+      allow write: if isAuthenticated() || isPlatformOwner() || isAdmin() || isTeacher();
+    }
+
+    // ================================================================
+    // PUBLIC INBOUND LEADS & TUTOR REGISTRATIONS
+    // ================================================================
+
+    match /pan_india_leads/{leadId} {
+      // Allow public create if phone is string and has length >= 10
+      allow create: if request.resource.data.phone is string &&
+                    request.resource.data.phone.size() >= 10;
+      // Allow read, update, delete for the admin lead console
+      allow read, update, delete: if isPlatformOwner();
+    }
+
+    match /tutor_registrations/{tutorId} {
+      // Allow public create if phone is string and has length >= 10
+      allow create: if request.resource.data.phone is string &&
+                    request.resource.data.phone.size() >= 10;
+      // Allow read, update, delete for the admin lead console
+      allow read, update, delete: if isPlatformOwner();
+    }
+
+    // Explicitly deny any undefined paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
