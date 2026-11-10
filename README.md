@@ -8,6 +8,21 @@
 [![Security](https://img.shields.io/badge/Security-47KB%20Hardened%20Rules-emerald)](#)
 [![License](https://img.shields.io/badge/License-Whitelabel%20Commercial-success)](https://unnataisolutions.com/software-license)
 
+<br/>
+
+<div align="center">
+
+[![Buy Agency Whitelabel Source Code $499](https://img.shields.io/badge/Instant%20Checkout-Agency%20Whitelabel%20Codebase%20$499-0284c7?style=for-the-badge&logo=github)](https://rzp.io/rzp/5xGEcK0f)
+[![Commercial Licensing Portal](https://img.shields.io/badge/Commercial%20Licensing-Portal%20Details-7c3aed?style=for-the-badge&logo=googlechrome)](https://unnataisolutions.com/software-license)
+
+<br/><br/>
+
+<img src="https://unnataisolutions.com/assets/custom-software-ui.png" alt="Unnat EduOS Examination & Paper Grader UI" width="850" style="border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);" />
+
+*AI Computer Vision Exam Evaluation & Student Mastery Matrix (274 Active Flutter Screens)*
+
+</div>
+
 ---
 
 ## 🏛️ Executive Summary
